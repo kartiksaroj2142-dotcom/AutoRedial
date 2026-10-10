@@ -1,0 +1,365 @@
+name: Build APK
+on:
+  push:
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.7
+      - name: Create project files
+        run: |
+          set -e
+          mkdir -p AutoRedial && cd AutoRedial
+          mkdir -p .
+          cat > settings.gradle.kts <<'EOF_0'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "AutoRedial"
+          include(":app")
+          EOF_0
+          mkdir -p .
+          cat > build.gradle.kts <<'EOF_1'
+          plugins {
+              id("com.android.application") version "8.5.2" apply false
+              id("org.jetbrains.kotlin.android") version "1.9.24" apply false
+          }
+          EOF_1
+          mkdir -p .
+          cat > gradle.properties <<'EOF_2'
+          android.useAndroidX=true
+          org.gradle.jvmargs=-Xmx2g
+          EOF_2
+          mkdir -p app
+          cat > app/build.gradle.kts <<'EOF_3'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+
+          android {
+              namespace = "com.example.autoredial"
+              compileSdk = 34
+
+              defaultConfig {
+                  applicationId = "com.example.autoredial"
+                  minSdk = 31
+                  targetSdk = 34
+                  versionCode = 1
+                  versionName = "1.0"
+              }
+
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+              kotlinOptions {
+                  jvmTarget = "17"
+              }
+          }
+
+          dependencies {
+              implementation("androidx.core:core-ktx:1.13.1")
+              implementation("androidx.appcompat:appcompat:1.7.0")
+          }
+          EOF_3
+          mkdir -p app/src/main
+          cat > app/src/main/AndroidManifest.xml <<'EOF_4'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+              <uses-permission android:name="android.permission.CALL_PHONE" />
+              <uses-permission android:name="android.permission.READ_PHONE_STATE" />
+              <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+
+              <application
+                  android:allowBackup="true"
+                  android:label="Auto Redial"
+                  android:theme="@style/Theme.AppCompat.DayNight.DarkActionBar">
+
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                      <!-- Needed so Android lets this app become the default phone app -->
+                      <intent-filter>
+                          <action android:name="android.intent.action.DIAL" />
+                          <category android:name="android.intent.category.DEFAULT" />
+                      </intent-filter>
+                      <intent-filter>
+                          <action android:name="android.intent.action.DIAL" />
+                          <category android:name="android.intent.category.DEFAULT" />
+                          <data android:scheme="tel" />
+                      </intent-filter>
+                  </activity>
+
+                  <service
+                      android:name=".RedialInCallService"
+                      android:exported="true"
+                      android:permission="android.permission.BIND_INCALL_SERVICE">
+                      <meta-data
+                          android:name="android.telecom.IN_CALL_SERVICE_UI"
+                          android:value="true" />
+                      <intent-filter>
+                          <action android:name="android.telecom.InCallService" />
+                      </intent-filter>
+                  </service>
+              </application>
+          </manifest>
+          EOF_4
+          mkdir -p app/src/main/java/com/example/autoredial
+          cat > app/src/main/java/com/example/autoredial/MainActivity.kt <<'EOF_5'
+          package com.example.autoredial
+
+          import android.Manifest
+          import android.app.role.RoleManager
+          import android.content.Intent
+          import android.content.pm.PackageManager
+          import android.os.Bundle
+          import android.text.InputType
+          import android.view.Gravity
+          import android.widget.Button
+          import android.widget.EditText
+          import android.widget.LinearLayout
+          import android.widget.TextView
+          import android.widget.Toast
+          import androidx.appcompat.app.AppCompatActivity
+          import androidx.core.app.ActivityCompat
+          import androidx.core.content.ContextCompat
+
+          class MainActivity : AppCompatActivity() {
+
+              private lateinit var numberInput: EditText
+              private lateinit var cutInput: EditText
+              private lateinit var maxInput: EditText
+              private lateinit var statusText: TextView
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+
+                  val pad = (20 * resources.displayMetrics.density).toInt()
+                  val root = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      setPadding(pad, pad, pad, pad)
+                  }
+
+                  numberInput = EditText(this).apply {
+                      hint = "Phone number"
+                      inputType = InputType.TYPE_CLASS_PHONE
+                  }
+                  cutInput = EditText(this).apply {
+                      hint = "Kitne second baad cut (default 1)"
+                      inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_DECIMAL
+                      setText("1")
+                  }
+                  maxInput = EditText(this).apply {
+                      hint = "Max attempts (0 = unlimited)"
+                      inputType = InputType.TYPE_CLASS_NUMBER
+                      setText("0")
+                  }
+                  statusText = TextView(this).apply {
+                      textSize = 18f
+                      gravity = Gravity.CENTER
+                      setPadding(0, pad, 0, pad)
+                      text = Redialer.status
+                  }
+                  val roleBtn = Button(this).apply {
+                      text = "1) Default phone app banao (ek baar)"
+                      setOnClickListener { requestDialerRole() }
+                  }
+                  val startBtn = Button(this).apply {
+                      text = "2) START"
+                      setOnClickListener { startRedial() }
+                  }
+                  val stopBtn = Button(this).apply {
+                      text = "STOP"
+                      setOnClickListener { Redialer.stop("Ruka hua") }
+                  }
+
+                  listOf(numberInput, cutInput, maxInput, roleBtn, startBtn, stopBtn, statusText)
+                      .forEach { root.addView(it) }
+                  setContentView(root)
+
+                  Redialer.onUpdate = { runOnUiThread { statusText.text = Redialer.status } }
+                  ActivityCompat.requestPermissions(
+                      this,
+                      arrayOf(Manifest.permission.CALL_PHONE, Manifest.permission.READ_PHONE_STATE),
+                      1
+                  )
+              }
+
+              private fun requestDialerRole() {
+                  val rm = getSystemService(RoleManager::class.java)
+                  if (rm.isRoleHeld(RoleManager.ROLE_DIALER)) {
+                      Toast.makeText(this, "Pehle se default hai", Toast.LENGTH_SHORT).show()
+                  } else {
+                      startActivityForResult(rm.createRequestRoleIntent(RoleManager.ROLE_DIALER), 42)
+                  }
+              }
+
+              private fun startRedial() {
+                  val num = numberInput.text.toString().trim()
+                  if (num.isEmpty()) {
+                      Toast.makeText(this, "Number daalo", Toast.LENGTH_SHORT).show()
+                      return
+                  }
+                  if (ContextCompat.checkSelfPermission(this, Manifest.permission.CALL_PHONE)
+                      != PackageManager.PERMISSION_GRANTED
+                  ) {
+                      Toast.makeText(this, "Call permission do", Toast.LENGTH_SHORT).show()
+                      return
+                  }
+                  val rm = getSystemService(RoleManager::class.java)
+                  if (!rm.isRoleHeld(RoleManager.ROLE_DIALER)) {
+                      Toast.makeText(this, "Pehle step 1 karo", Toast.LENGTH_SHORT).show()
+                      return
+                  }
+                  val cutMs = ((cutInput.text.toString().toDoubleOrNull() ?: 1.0) * 1000).toLong()
+                      .coerceAtLeast(500)
+                  val max = maxInput.text.toString().toIntOrNull() ?: 0
+                  Redialer.start(this, num, cutMs, max)
+              }
+
+              override fun onDestroy() {
+                  Redialer.onUpdate = null
+                  super.onDestroy()
+              }
+          }
+          EOF_5
+          mkdir -p app/src/main/java/com/example/autoredial
+          cat > app/src/main/java/com/example/autoredial/Redialer.kt <<'EOF_6'
+          package com.example.autoredial
+
+          import android.content.Context
+          import android.content.Intent
+          import android.net.Uri
+          import android.os.Handler
+          import android.os.Looper
+
+          object Redialer {
+              private val handler = Handler(Looper.getMainLooper())
+
+              @Volatile var running = false
+              var number = ""
+              var cutAfterMs = 1000L
+              var maxAttempts = 0          // 0 = unlimited
+              var attempts = 0
+              var status = "Ruka hua"
+              var onUpdate: (() -> Unit)? = null
+
+              fun start(ctx: Context, num: String, cutMs: Long, max: Int) {
+                  number = num
+                  cutAfterMs = cutMs
+                  maxAttempts = max
+                  attempts = 0
+                  running = true
+                  dial(ctx.applicationContext)
+              }
+
+              fun stop(reason: String = "Ruka hua") {
+                  running = false
+                  handler.removeCallbacksAndMessages(null)
+                  status = reason
+                  onUpdate?.invoke()
+              }
+
+              fun dial(ctx: Context) {
+                  if (!running) return
+                  if (maxAttempts in 1..attempts) {
+                      stop("Max attempts poore ho gaye ($attempts)")
+                      return
+                  }
+                  attempts++
+                  status = "Call #$attempts lag rahi hai..."
+                  onUpdate?.invoke()
+                  val intent = Intent(Intent.ACTION_CALL, Uri.fromParts("tel", number, null))
+                      .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                  try {
+                      ctx.startActivity(intent)
+                  } catch (e: SecurityException) {
+                      stop("Call permission nahi mili")
+                  }
+              }
+
+              fun redialSoon(ctx: Context, delayMs: Long = 300) {
+                  if (!running) return
+                  handler.postDelayed({ dial(ctx) }, delayMs)
+              }
+
+              fun postDelayed(ms: Long, r: Runnable) = handler.postDelayed(r, ms)
+          }
+          EOF_6
+          mkdir -p app/src/main/java/com/example/autoredial
+          cat > app/src/main/java/com/example/autoredial/RedialInCallService.kt <<'EOF_7'
+          package com.example.autoredial
+
+          import android.telecom.Call
+          import android.telecom.CallAudioState
+          import android.telecom.InCallService
+
+          class RedialInCallService : InCallService() {
+
+              override fun onCallAdded(call: Call) {
+                  super.onCallAdded(call)
+                  if (!Redialer.running) return
+
+                  // Call lagte hi speaker on
+                  setAudioRoute(CallAudioState.ROUTE_SPEAKER)
+
+                  call.registerCallback(object : Call.Callback() {
+                      override fun onStateChanged(call: Call, state: Int) {
+                          when (state) {
+                              Call.STATE_ACTIVE -> {
+                                  // Samne wale ne utha liya -> loop band, call chalne do
+                                  if (Redialer.running) Redialer.stop("Call connect ho gayi")
+                              }
+                              Call.STATE_DISCONNECTED -> {
+                                  // Busy / fail / cut -> turant dobara
+                                  Redialer.redialSoon(applicationContext)
+                              }
+                          }
+                      }
+                  })
+
+                  // Tay samay (default 1 sec) mein connect na hui to cut karke redial
+                  Redialer.postDelayed(Redialer.cutAfterMs, Runnable {
+                      if (Redialer.running && call.state != Call.STATE_ACTIVE &&
+                          call.state != Call.STATE_DISCONNECTED
+                      ) {
+                          call.disconnect()
+                      }
+                  })
+              }
+
+              override fun onCallRemoved(call: Call) {
+                  super.onCallRemoved(call)
+              }
+          }
+          EOF_7
+      - name: Build debug APK
+        working-directory: AutoRedial
+        run: gradle assembleDebug --no-daemon
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AutoRedial-apk
+          path: AutoRedial/app/build/outputs/apk/debug/app-debug.apk
